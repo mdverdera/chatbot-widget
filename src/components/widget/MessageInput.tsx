@@ -53,7 +53,7 @@ export function MessageInput({
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex items-end gap-2 px-3 py-3 border-t border-widget-border bg-widget-surface"
+      className="flex items-end gap-2 px-3 py-3 border-t border-widget-border bg-widget-surface flex-shrink-0"
     >
       <textarea
         ref={textareaRef}
@@ -65,7 +65,7 @@ export function MessageInput({
         disabled={isDisabled}
         placeholder={placeholder}
         aria-label="Message input"
-        className="flex-1 resize-none rounded-xl border border-widget-border px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-widget-primary focus:border-transparent disabled:opacity-50 max-h-[120px] leading-relaxed"
+        className="flex-1 resize-none rounded-xl border border-widget-border bg-widget-input-bg px-3 py-2 text-sm text-widget-text placeholder-widget-muted focus:outline-none focus:ring-2 focus:ring-widget-primary focus:border-transparent disabled:opacity-50 max-h-[120px] leading-relaxed"
       />
       <button
         type="submit"

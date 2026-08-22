@@ -5,13 +5,13 @@ import React from 'react';
 interface ChatButtonProps {
   isOpen: boolean;
   onClick: () => void;
-  primaryColor?: string;
   ariaLabel?: string;
 }
 
 /**
  * Floating action button that toggles the chat window open/closed.
  * Renders a chat icon when closed and an X icon when open.
+ * Colour is inherited from the --widget-primary CSS variable set by ChatWidget.
  */
 export function ChatButton({
   isOpen,

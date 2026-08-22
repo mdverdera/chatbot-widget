@@ -46,7 +46,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           className={`px-3 py-2 rounded-2xl text-sm leading-relaxed break-words ${
             isUser
               ? 'bg-widget-primary text-white rounded-br-sm'
-              : 'bg-widget-bubble-bot text-gray-800 rounded-bl-sm'
+              : 'bg-widget-bubble-bot text-widget-bubble-bot-text rounded-bl-sm'
           }`}
         >
           {message.content}
@@ -58,9 +58,9 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 
       {/* User avatar */}
       {isUser && (
-        <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center ml-2 mt-1">
+        <div className="flex-shrink-0 w-7 h-7 rounded-full bg-widget-surface-2 flex items-center justify-center ml-2 mt-1">
           <svg
-            className="w-4 h-4 text-gray-500"
+            className="w-4 h-4 text-widget-muted"
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"

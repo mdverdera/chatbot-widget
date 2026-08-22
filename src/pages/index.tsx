@@ -13,6 +13,7 @@ const DEMO_WIDGET_CONFIG: WidgetConfig = {
   greeting: 'Hi there! 👋 This is a live demo of the chatbot widget.',
   primaryColor: '#2563eb',
   position: 'bottom-right',
+  theme: 'light',
 };
 
 export default function Home() {

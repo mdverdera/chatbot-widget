@@ -75,13 +75,20 @@ export const getServerSideProps: GetServerSideProps<WidgetPageProps> = async ({
   const position =
     query.position === 'bottom-left' ? 'bottom-left' : 'bottom-right';
 
+  const theme =
+    query.theme === 'dark' ? 'dark'
+    : query.theme === 'auto' ? 'auto'
+    : 'light';
+
   // Phase 1: accept any non-empty widgetId and return defaults.
+  // Phase 2+: fetch row from DB and use row.primaryColor, row.theme, etc.
   const config: WidgetConfig = {
     widgetId,
     botName: 'Assistant',
     greeting: 'Hi there! 👋 How can I help you today?',
     primaryColor: '#2563eb',
     position,
+    theme,
   };
 
   return { props: { config } };

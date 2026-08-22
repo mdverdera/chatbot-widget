@@ -12,7 +12,7 @@ interface ChatHeaderProps {
  */
 export function ChatHeader({ botName, onClose }: ChatHeaderProps) {
   return (
-    <div className="flex items-center justify-between px-4 py-3 bg-widget-primary rounded-t-2xl">
+    <div className="flex items-center justify-between px-4 py-3 bg-widget-primary rounded-t-2xl flex-shrink-0">
       {/* Status dot + bot name */}
       <div className="flex items-center gap-2">
         <span
@@ -28,7 +28,7 @@ export function ChatHeader({ botName, onClose }: ChatHeaderProps) {
       <button
         onClick={onClose}
         aria-label="Close chat"
-        className="text-blue-200 hover:text-white transition-colors rounded-lg p-1 hover:bg-white/10"
+        className="text-white/60 hover:text-white transition-colors rounded-lg p-1 hover:bg-white/10"
       >
         <svg
           className="w-5 h-5"

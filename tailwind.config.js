@@ -9,16 +9,27 @@ module.exports = {
     extend: {
       colors: {
         widget: {
-          primary: '#2563eb',
-          'primary-hover': '#1d4ed8',
-          'primary-light': '#eff6ff',
-          surface: '#ffffff',
-          border: '#e5e7eb',
-          muted: '#6b7280',
+          // ── Accent (set by CMS primaryColor) ──────────────────────────────
+          primary:         'var(--widget-primary, #2563eb)',
+          'primary-hover': 'var(--widget-primary-hover, #1d4ed8)',
+          'primary-light': 'var(--widget-primary-light, #eff6ff)',
+          // ── Theme surfaces/text (set by light/dark/auto theme) ────────────
+          surface:         'var(--widget-surface, #ffffff)',
+          'surface-2':     'var(--widget-surface-2, #f3f4f6)',
+          border:          'var(--widget-border, #e5e7eb)',
+          text:            'var(--widget-text, #111827)',
+          muted:           'var(--widget-text-muted, #6b7280)',
+          'input-bg':      'var(--widget-input-bg, #ffffff)',
+          // ── Bubbles ───────────────────────────────────────────────────────
           bubble: {
-            user: '#2563eb',
-            bot: '#f3f4f6',
+            user:  'var(--widget-primary, #2563eb)',
+            bot:   'var(--widget-bubble-bot-bg, #f3f4f6)',
+            'bot-text': 'var(--widget-bubble-bot-fg, #111827)',
           },
+          // ── Error state ───────────────────────────────────────────────────
+          'error-bg':     'var(--widget-error-bg, #fef2f2)',
+          'error-border': 'var(--widget-error-border, #fecaca)',
+          'error-text':   'var(--widget-error-text, #dc2626)',
         },
       },
       boxShadow: {

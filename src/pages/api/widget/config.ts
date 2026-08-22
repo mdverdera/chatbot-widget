@@ -17,6 +17,7 @@ interface WidgetConfigResponse {
   greeting: string;
   primaryColor: string;
   position: 'bottom-right' | 'bottom-left';
+  theme: 'light' | 'dark' | 'auto';
   isActive: boolean;
 }
 
@@ -43,13 +44,16 @@ export default function handler(
   }
 
   // Phase 1: all widget IDs are accepted and return default config.
-  // Phase 2+: validate widgetId against the database, check domain allowlist, etc.
+  // Phase 2+: query the database by widgetId and return the owner's settings:
+  //   const row = await db.widgets.findUnique({ where: { id: widgetId } });
+  //   if (!row || !row.isActive) return res.status(404).json({ error: 'Widget not found' });
   const config: WidgetConfigResponse = {
     widgetId: widgetId.trim(),
     botName: 'Assistant',
     greeting: 'Hi there! 👋 How can I help you today?',
-    primaryColor: '#2563eb',
+    primaryColor: '#2563eb', // Phase 2+: row.primaryColor from CMS
     position: 'bottom-right',
+    theme: 'light',          // Phase 2+: row.theme from CMS
     isActive: true,
   };
 

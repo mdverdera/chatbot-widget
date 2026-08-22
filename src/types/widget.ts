@@ -40,6 +40,8 @@ export interface ApiErrorResponse {
 // Widget configuration (passed via script tag)
 // ──────────────────────────────────────────────
 
+export type WidgetTheme = 'light' | 'dark' | 'auto';
+
 export interface WidgetConfig {
   /** The public widget ID issued to a website owner. */
   widgetId: string;
@@ -51,4 +53,12 @@ export interface WidgetConfig {
   primaryColor?: string;
   /** Optional: position on screen — default 'bottom-right'. */
   position?: 'bottom-right' | 'bottom-left';
+  /**
+   * Optional: colour theme.
+   * 'light'  — always light
+   * 'dark'   — always dark
+   * 'auto'   — follows the host page's prefers-color-scheme media query
+   * Default: 'light'
+   */
+  theme?: WidgetTheme;
 }

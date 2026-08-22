@@ -84,7 +84,7 @@ export function ChatWindow({ config, onClose }: ChatWindowProps) {
       {error && (
         <div
           role="alert"
-          className="mx-3 mb-2 px-3 py-2 bg-red-50 border border-red-200 rounded-xl text-xs text-red-600"
+          className="mx-3 mb-2 px-3 py-2 bg-widget-error-bg border border-widget-error-border rounded-xl text-xs text-widget-error-text"
         >
           {error}
         </div>
