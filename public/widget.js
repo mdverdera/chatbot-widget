@@ -1,5 +1,5 @@
 /**
- * widget.js — Public embeddable entry point
+ * widget.js - Public embeddable entry point
  *
  * Usage on any website:
  *
@@ -10,12 +10,19 @@
  *
  * Optional data attributes:
  *   data-position="bottom-left"   (default: bottom-right)
+ *   data-theme="light|dark|auto"  (default: auto)
  *
  * This script is written in plain ES5-compatible JavaScript so it runs on
  * any host page without transpilation.
  *
  * It injects a full-viewport transparent iframe that hosts the React widget,
  * giving complete CSS isolation from the host website.
+ *
+ * Click-through design:
+ *   The iframe covers the full viewport but is completely transparent.
+ *   Inside the iframe, html/body have pointer-events:none so clicks on
+ *   transparent areas fall through to the host page. Only the widget button
+ *   and chat window have pointer-events:auto (set in the widget's CSS).
  *
  * NO secret keys are present in this file.
  */
@@ -37,6 +44,9 @@
   var position =
     (currentScript && currentScript.getAttribute('data-position')) ||
     'bottom-right';
+  var theme =
+    (currentScript && currentScript.getAttribute('data-theme')) ||
+    'auto';
 
   if (!widgetId) {
     console.error('[ChatWidget] data-widget-id attribute is required.');
@@ -57,9 +67,15 @@
     '/widget/' +
     encodeURIComponent(widgetId) +
     '?position=' +
-    encodeURIComponent(position);
+    encodeURIComponent(position) +
+    '&theme=' +
+    encodeURIComponent(theme);
 
-  // Create the full-viewport transparent iframe overlay
+  // Create the full-viewport transparent iframe overlay.
+  // pointer-events:auto on the iframe is required so that clicks on the
+  // widget button (which sets pointer-events:auto on itself inside the iframe)
+  // are actually received. The transparent background click-through is
+  // achieved via html/body { pointer-events:none } inside the widget page.
   var iframe = document.createElement('iframe');
   iframe.setAttribute('src', widgetPageUrl);
   iframe.setAttribute('title', 'Chat Widget');
@@ -68,9 +84,6 @@
   iframe.setAttribute('frameborder', '0');
   iframe.setAttribute('scrolling', 'no');
 
-  // Cover the full viewport; background is transparent so the widget chrome
-  // is the only visible element. pointer-events:none lets host clicks pass
-  // through when the chat window is closed.
   iframe.style.cssText = [
     'position:fixed',
     'top:0',
@@ -79,7 +92,7 @@
     'height:100%',
     'border:none',
     'z-index:2147483647',
-    'pointer-events:none',
+    'pointer-events:auto',
     'background:transparent',
     'overflow:hidden',
   ].join(';');
@@ -95,26 +108,13 @@
     mount();
   }
 
-  // postMessage bridge — toggle pointer-events based on chat open/close state
-  window.addEventListener('message', function (event) {
-    if (event.origin !== widgetOrigin) return;
-    var data = event.data;
-    if (!data || data.type !== 'chatbot-widget') return;
-
-    if (data.action === 'open') {
-      iframe.style.pointerEvents = 'auto';
-    } else if (data.action === 'close' || data.action === 'ready') {
-      iframe.style.pointerEvents = 'none';
-    }
-  });
-
-  // Public API — accessible as window.ChatbotWidget on the host page
+  // Public API - accessible as window.ChatbotWidget on the host page
   window.ChatbotWidget = {
     open: function () {
       if (iframe.contentWindow) {
         iframe.contentWindow.postMessage(
           { type: 'chatbot-widget', action: 'open' },
-          widgetOrigin,
+          widgetOrigin
         );
       }
     },
@@ -122,7 +122,7 @@
       if (iframe.contentWindow) {
         iframe.contentWindow.postMessage(
           { type: 'chatbot-widget', action: 'close' },
-          widgetOrigin,
+          widgetOrigin
         );
       }
     },

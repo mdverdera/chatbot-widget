@@ -114,7 +114,7 @@ export function ChatWidget({ config, externalOpen }: ChatWidgetProps) {
 
   return (
     <div
-      className={`fixed z-[9999] flex flex-col gap-3 ${positionClasses}`}
+      className={`fixed z-[9999] flex flex-col gap-3 pointer-events-auto ${positionClasses}`}
       style={cssVars}
       data-widget-id={config.widgetId}
       data-theme={theme === 'auto' ? (resolvedDark ? 'dark' : 'light') : theme}
