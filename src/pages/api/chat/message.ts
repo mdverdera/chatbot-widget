@@ -5,12 +5,26 @@ import type {
   SendMessageResponse,
   ApiErrorResponse,
 } from '@/types/widget';
+import { verifyWidgetToken } from '@/lib/token';
+import { checkRateLimit } from '@/lib/rate-limiter';
+import { setCorsOrigin } from '@/lib/cors';
 import { MOCK_RESPONSE_DELAY_MS } from '@/lib/constants';
 
-// ──────────────────────────────────────────────
-// Mock response logic
-// Phase 2+: replace this with an LLM / CMS-backed handler.
-// ──────────────────────────────────────────────
+/**
+ * POST /api/chat/message
+ *
+ * Phase 3 security:
+ *   - Requires a valid Bearer token in the Authorization header.
+ *   - Token is verified: signature (HMAC-SHA-256), expiry, widgetId binding,
+ *     and origin binding.
+ *   - Rate-limited per IP to prevent abuse.
+ *   - Requests with missing / invalid tokens are rejected with 401.
+ *
+ * Phase 4+: replace mock response logic with a real LLM call.
+ */
+
+// ── Mock response logic ───────────────────────────────────────────────────────
+// Phase 4+: replace this block with an LLM / CMS-backed handler.
 
 const MOCK_RESPONSES: string[] = [
   "Thanks for your message! I'm a demo assistant — real AI responses are coming soon.",
@@ -22,17 +36,14 @@ const MOCK_RESPONSES: string[] = [
 ];
 
 function getMockReply(userMessage: string): string {
-  // Simple deterministic hash so the same input always returns the same mock.
   let hash = 0;
   for (let i = 0; i < userMessage.length; i++) {
     hash = (hash * 31 + userMessage.charCodeAt(i)) >>> 0;
   }
-  return MOCK_RESPONSES[hash % MOCK_RESPONSES.length];
+  return MOCK_RESPONSES[hash % MOCK_RESPONSES.length]!;
 }
 
-// ──────────────────────────────────────────────
-// Validation helpers
-// ──────────────────────────────────────────────
+// ── Validation helpers ────────────────────────────────────────────────────────
 
 function isValidWidgetId(widgetId: unknown): widgetId is string {
   return typeof widgetId === 'string' && widgetId.trim().length > 0;
@@ -46,16 +57,30 @@ function isValidMessage(message: unknown): message is string {
   );
 }
 
-// ──────────────────────────────────────────────
-// Route handler
-// ──────────────────────────────────────────────
+/** Extract the Bearer token from the Authorization header. */
+function extractBearerToken(authHeader: string | undefined): string | null {
+  if (!authHeader) return null;
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  return match ? (match[1] ?? null) : null;
+}
+
+// ── Rate-limit config ─────────────────────────────────────────────────────────
+// 60 messages per IP per minute.
+const CHAT_RATE_LIMIT  = 60;
+const CHAT_RATE_WINDOW = 60 * 1000; // 1 minute
+
+// ── Route handler ─────────────────────────────────────────────────────────────
 
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<SendMessageResponse | ApiErrorResponse>,
 ) {
-  // Handle CORS pre-flight
+  // ── CORS pre-flight ───────────────────────────────────────────────────────
   if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin ?? '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Vary', 'Origin');
     res.status(200).end();
     return;
   }
@@ -67,6 +92,22 @@ export default async function handler(
       .json({ error: 'Method not allowed', code: 'METHOD_NOT_ALLOWED' });
   }
 
+  // ── Rate limit by IP ──────────────────────────────────────────────────────
+  const ip =
+    (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ??
+    req.socket.remoteAddress ??
+    'unknown';
+
+  const rate = checkRateLimit(`chat:${ip}`, CHAT_RATE_LIMIT, CHAT_RATE_WINDOW);
+  if (!rate.allowed) {
+    res.setHeader('Retry-After', String(rate.retryAfterSeconds));
+    return res.status(429).json({
+      error: 'Too many requests. Please slow down.',
+      code: 'RATE_LIMITED',
+    });
+  }
+
+  // ── Input validation ──────────────────────────────────────────────────────
   const body = req.body as Partial<SendMessageRequest>;
 
   if (!isValidWidgetId(body.widgetId)) {
@@ -82,17 +123,38 @@ export default async function handler(
     });
   }
 
+  // ── Token verification ────────────────────────────────────────────────────
+  const token  = extractBearerToken(req.headers.authorization);
+  const origin = req.headers.origin;
+
+  if (!token) {
+    return res
+      .status(401)
+      .json({ error: 'Authorization token required', code: 'MISSING_TOKEN' });
+  }
+
+  const tokenResult = await verifyWidgetToken(token, body.widgetId, origin);
+  if (!tokenResult.valid) {
+    return res
+      .status(401)
+      .json({ error: 'Invalid or expired token', code: 'INVALID_TOKEN' });
+  }
+
+  // ── Handle session ID ─────────────────────────────────────────────────────
   const sessionId =
     typeof body.sessionId === 'string' && body.sessionId.trim().length > 0
       ? body.sessionId
       : uuidv4();
 
-  // Simulate processing time (remove in Phase 2 once a real service is wired in)
+  // ── Mock response (Phase 4+: replace with LLM call) ──────────────────────
   await new Promise<void>((resolve) =>
     setTimeout(resolve, MOCK_RESPONSE_DELAY_MS),
   );
 
   const reply = getMockReply(body.message);
+
+  // Set origin-bound CORS header only for the validated origin.
+  setCorsOrigin(req, res, body.widgetId);
 
   return res.status(200).json({
     reply,

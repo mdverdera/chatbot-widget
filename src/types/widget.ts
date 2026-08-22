@@ -33,7 +33,16 @@ export interface SendMessageResponse {
 
 export interface ApiErrorResponse {
   error: string;
-  code?: string;
+  code?:
+    | 'METHOD_NOT_ALLOWED'
+    | 'MISSING_WIDGET_ID'
+    | 'INVALID_MESSAGE'
+    | 'MISSING_TOKEN'
+    | 'INVALID_TOKEN'
+    | 'UNAUTHORIZED'
+    | 'RATE_LIMITED'
+    | 'SERVER_ERROR'
+    | string;
 }
 
 // ──────────────────────────────────────────────
