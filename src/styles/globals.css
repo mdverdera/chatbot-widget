@@ -19,14 +19,3 @@
     border-radius: 9999px;
   }
 }
-
-
-/* ── Click-through for the full-viewport transparent iframe ──────────────────
-   The iframe covers the entire host page. We make html/body non-interactive
-   so clicks pass through the transparent areas to the host page beneath.
-   Individual widget elements (ChatWidget root div) set pointer-events:auto
-   to make themselves clickable again.                                        */
-html, body {
-  pointer-events: none;
-  background: transparent;
-}
