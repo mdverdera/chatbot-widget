@@ -97,15 +97,25 @@ export async function runRagPipeline(input: RagInput): Promise<RagOutcome> {
   // ── Step 2: Tenant-scoped vector search ────────────────────────────────────
   // searchVectors() ONLY searches within the given tenantId.
   // Cross-tenant data is never accessible here.
-  const results = await searchVectors(tenantId, queryEmbedding, RAG_TOP_K, SIMILARITY_THRESHOLD);
+  //
+  // Pass threshold=0 so the DB returns the best available matches regardless
+  // of score. We log the raw scores first (for diagnostics), then apply
+  // SIMILARITY_THRESHOLD in JS. This ensures the log line always shows what
+  // the top scores actually are — even when they fall below the threshold.
+  const rawResults = await searchVectors(tenantId, queryEmbedding, RAG_TOP_K, 0);
 
+  const topScores = rawResults.map((r) => r.score.toFixed(3)).join(', ');
   console.log(
-    `[rag-pipeline] tenant=${tenantId} | hits=${results.length} | ` +
-    `best=${results[0]?.score?.toFixed(3) ?? 'none'} | threshold=${SIMILARITY_THRESHOLD}`,
+    `[rag-pipeline] tenant=${tenantId} | rawHits=${rawResults.length} | ` +
+    `topScores=[${topScores || 'none'}] | threshold=${SIMILARITY_THRESHOLD}`,
   );
 
   // ── Step 3: Threshold check ────────────────────────────────────────────────
-  if (isBelowThreshold(results[0]?.score)) {
+  const results = rawResults.filter((r) => r.score >= SIMILARITY_THRESHOLD);
+  console.log(
+    `[rag-pipeline] tenant=${tenantId} | hitsAboveThreshold=${results.length}`,
+  );
+  if (results.length === 0) {
     return { status: 'fallback', reply: FALLBACK_MESSAGE };
   }
 
