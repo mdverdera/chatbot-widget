@@ -91,7 +91,9 @@ export default async function handler(
 
   // ── Issue token ───────────────────────────────────────────────────────────
   try {
-    const token = await issueWidgetToken(widgetId, origin!);
+    // Pass tenantId from the registry record so it travels inside the JWT.
+    // The chat handler extracts it from the verified token to scope RAG retrieval.
+    const token = await issueWidgetToken(widgetId, origin!, validation.record.tenantId);
     // Set origin-bound CORS header only for the validated origin.
     setCorsOrigin(req, res, widgetId);
     return res.status(200).json({ token, expiresIn: TOKEN_TTL_SECONDS });

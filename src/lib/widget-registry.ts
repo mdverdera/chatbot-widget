@@ -2,18 +2,24 @@
  * Widget Registry — server-side only.
  *
  * Acts as the authoritative source of truth for which widget IDs are valid,
- * which origins (domains) are authorised to embed each widget, and whether
- * the widget is currently active.
+ * which origins (domains) are authorised to embed each widget, whether the
+ * widget is currently active, and which CMS tenant it belongs to.
  *
  * Phase 3: in-memory store seeded from environment variables so the chatbot
  * can run standalone while the CMS is the source of truth.
  * Phase 4+: replace `WIDGET_REGISTRY` with a database query to the CMS.
  *
  * Environment variable format (comma-separated entries, pipe-separated fields):
- *   WIDGET_REGISTRY=<widgetId>|<allowedOrigins>|<active>,...
+ *   WIDGET_REGISTRY=<widgetId>|<allowedOrigins>|<active>|<tenantId>,...
+ *
+ * Fields:
+ *   widgetId       — public widget ID issued by the CMS.
+ *   allowedOrigins — semicolon-separated list of exact Origin values.
+ *   active         — "true" or "false".
+ *   tenantId       — CMS tenant that owns this widget (used for RAG scoping).
  *
  * Example:
- *   WIDGET_REGISTRY=abc123|https://example.com,https://www.example.com|true,xyz789|https://shop.io|false
+ *   WIDGET_REGISTRY=abc123|https://example.com;https://www.example.com|true|tenant-1,xyz789|https://shop.io|true|tenant-2
  *
  * NEVER import this module from client-side code.
  */
@@ -23,6 +29,12 @@ export interface WidgetRecord {
   /** Exact origin strings that are allowed to embed this widget. */
   allowedOrigins: string[];
   isActive: boolean;
+  /**
+   * The CMS tenant that owns this widget.
+   * Stamped into the JWT and used to scope every vector search.
+   * An empty string means no tenant was configured (RAG will not function).
+   */
+  tenantId: string;
 }
 
 // ── Registry loading ─────────────────────────────────────────────────────────
@@ -37,7 +49,7 @@ function loadRegistry(): Map<string, WidgetRecord> {
     const parts = entry.trim().split('|');
     if (parts.length < 2) continue;
 
-    const [widgetId, originsRaw, activeRaw] = parts;
+    const [widgetId, originsRaw, activeRaw, tenantIdRaw] = parts;
     if (!widgetId?.trim()) continue;
 
     const allowedOrigins = (originsRaw ?? '')
@@ -46,8 +58,14 @@ function loadRegistry(): Map<string, WidgetRecord> {
       .filter(Boolean);
 
     const isActive = activeRaw?.trim().toLowerCase() !== 'false';
+    const tenantId = tenantIdRaw?.trim() ?? '';
 
-    map.set(widgetId.trim(), { widgetId: widgetId.trim(), allowedOrigins, isActive });
+    map.set(widgetId.trim(), {
+      widgetId: widgetId.trim(),
+      allowedOrigins,
+      isActive,
+      tenantId,
+    });
   }
 
   return map;
