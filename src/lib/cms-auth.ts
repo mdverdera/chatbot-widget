@@ -31,18 +31,15 @@ import type { ApiErrorResponse } from '@/types/widget';
 // ── Config ────────────────────────────────────────────────────────────────────
 
 /**
- * Returns the secret used to validate INBOUND calls from the CMS.
- * Reads CHATBOT_API_SECRET with a fallback to CMS_API_SECRET for
- * backward-compatibility with deployments that use a single shared secret.
+ * Returns the shared secret used to validate INBOUND calls from the CMS.
+ * Both directions (outbound to CMS and inbound from CMS) use the same
+ * CMS_API_SECRET — set it to the same value on both sides.
  */
 function getInboundSecret(): string {
-  const secret =
-    process.env.CHATBOT_API_SECRET?.trim() ||
-    process.env.CMS_API_SECRET?.trim();
-
+  const secret = process.env.CMS_API_SECRET?.trim();
   if (!secret) {
     throw new Error(
-      'CHATBOT_API_SECRET environment variable is not set. Set it in .env.local.',
+      'CMS_API_SECRET environment variable is not set. Set it in .env.local.',
     );
   }
   return secret;
