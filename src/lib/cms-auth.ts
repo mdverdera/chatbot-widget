@@ -1,20 +1,26 @@
 /**
- * CMS tenant authentication — server-side only.
+ * CMS inbound authentication — server-side only.
  *
- * All knowledge ingestion and management endpoints must be called by the CMS,
- * not by end users.  The CMS authenticates itself by sending the shared secret
- * as a Bearer token:
+ * Validates requests that arrive FROM the CMS into this chatbot service.
+ * The CMS authenticates by sending the shared secret as a Bearer token:
  *
- *   Authorization: Bearer <CMS_API_SECRET>
+ *   Authorization: Bearer <CHATBOT_API_SECRET>
  *
- * This module validates that header and extracts the tenant ID from the
- * request body / query so every endpoint gets a verified tenantId without
- * duplicating the auth logic.
+ * Secret naming convention:
+ *   CHATBOT_API_SECRET  — the secret the CMS sends to THIS service (inbound).
+ *                         Set this on the chatbot side to match what the CMS sends.
+ *   CMS_API_SECRET      — the secret THIS service sends to the CMS (outbound).
+ *                         Used by cms-client.ts for GET/PATCH calls to the CMS.
+ *
+ * The two values may be equal in a simple deployment (one shared secret) or
+ * different if you want directional secrets.  The names intentionally reflect
+ * direction rather than identity.
  *
  * Security model:
  *   - One shared secret covers all tenants (the CMS manages multi-tenancy).
  *   - The tenantId in the payload is trusted only after the secret is verified.
  *   - If the secret is missing, wrong, or the tenantId is blank → reject.
+ *   - Comparison is constant-time to prevent timing attacks.
  *
  * NEVER import this module from client-side code.
  */
@@ -24,14 +30,22 @@ import type { ApiErrorResponse } from '@/types/widget';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-function getCmsApiSecret(): string {
-  const secret = process.env.CMS_API_SECRET;
-  if (!secret?.trim()) {
+/**
+ * Returns the secret used to validate INBOUND calls from the CMS.
+ * Reads CHATBOT_API_SECRET with a fallback to CMS_API_SECRET for
+ * backward-compatibility with deployments that use a single shared secret.
+ */
+function getInboundSecret(): string {
+  const secret =
+    process.env.CHATBOT_API_SECRET?.trim() ||
+    process.env.CMS_API_SECRET?.trim();
+
+  if (!secret) {
     throw new Error(
-      'CMS_API_SECRET environment variable is not set. Set it in .env.local.',
+      'CHATBOT_API_SECRET environment variable is not set. Set it in .env.local.',
     );
   }
-  return secret.trim();
+  return secret;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -62,7 +76,7 @@ function safeEqual(a: string, b: string): boolean {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Verify that a request comes from the CMS (valid shared secret) and extract
+ * Verify that a request comes from the CMS (valid inbound secret) and extract
  * the tenant ID from the provided value.
  *
  * @param req       - Incoming Next.js API request.
@@ -81,7 +95,7 @@ export function authenticateCmsRequest(
 
   let secret: string;
   try {
-    secret = getCmsApiSecret();
+    secret = getInboundSecret();
   } catch {
     return { authenticated: false, reason: 'Server misconfiguration' };
   }
@@ -118,4 +132,32 @@ export function requireCmsAuth(
     return null;
   }
   return { tenantId: result.tenantId };
+}
+
+/**
+ * Authenticate a request that carries no tenantId (e.g. pure push notifications
+ * where the tenantId is in the body and validated separately).
+ * Only validates the Bearer secret — does NOT require tenantId.
+ */
+export function requireCmsSecretOnly(
+  req: NextApiRequest,
+  res: NextApiResponse<ApiErrorResponse>,
+): boolean {
+  const token = extractBearerToken(req.headers.authorization);
+  if (!token) {
+    res.status(401).json({ error: 'Unauthorized', code: 'UNAUTHORIZED' });
+    return false;
+  }
+  let secret: string;
+  try {
+    secret = getInboundSecret();
+  } catch {
+    res.status(500).json({ error: 'Server misconfiguration', code: 'SERVER_ERROR' });
+    return false;
+  }
+  if (!safeEqual(token, secret)) {
+    res.status(401).json({ error: 'Unauthorized', code: 'UNAUTHORIZED' });
+    return false;
+  }
+  return true;
 }
