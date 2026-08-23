@@ -1,18 +1,24 @@
 /**
  * CMS Knowledge API client — server-side only.
  *
- * Communicates with the CMS at <CMS_BASE_URL> to fetch and update knowledge
- * documents.  Every request is authenticated with a shared secret sent as a
- * plain Bearer token — matching how the CMS verifies callers:
+ * Communicates with the CMS to fetch and update knowledge documents.
+ * Every outbound request is authenticated with a shared secret:
  *
  *   Authorization: Bearer <CMS_API_SECRET>
  *
+ * Secret naming convention:
+ *   CMS_API_SECRET      — sent BY this service TO the CMS (outbound).
+ *   CHATBOT_API_SECRET  — sent BY the CMS TO this service (inbound, see cms-auth.ts).
+ *
  * Endpoints consumed:
  *
- *   GET  <CMS_BASE_URL>/api/chatbot/knowledge?status=<status>&limit=<n>
- *     → KnowledgeDocument[] (each extended with a `download_url` field)
+ *   GET  <CMS_URL>/api/chatbot/knowledge?status=<status>&limit=<n>
+ *     → KnowledgeDocument[]  (each with a `download_url` field)
  *
- *   PATCH <CMS_BASE_URL>/api/chatbot/knowledge
+ *   GET  <CMS_URL>/api/chatbot/knowledge?id=<documentId>
+ *     → KnowledgeDocument | null
+ *
+ *   PATCH <CMS_URL>/api/chatbot/knowledge
  *     Body: { id, status, error_message? }
  *     → KnowledgeDocument (the updated row)
  *
@@ -21,24 +27,30 @@
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+/**
+ * Base URL of the CMS.
+ * Reads CMS_URL first (new canonical name), falls back to CMS_BASE_URL
+ * for backward-compatibility.
+ */
 function getCmsBaseUrl(): string {
-  const url = process.env.CMS_BASE_URL;
-  if (!url?.trim()) {
+  const url = (process.env.CMS_URL ?? process.env.CMS_BASE_URL)?.trim();
+  if (!url) {
     throw new Error(
-      'CMS_BASE_URL environment variable is not set. Set it in .env.local.',
+      'CMS_URL environment variable is not set. Set it in .env.local.',
     );
   }
-  return url.trim().replace(/\/$/, '');
+  return url.replace(/\/$/, '');
 }
 
+/** Secret sent by this service to the CMS for outbound requests. */
 function getCmsApiSecret(): string {
-  const secret = process.env.CMS_API_SECRET;
-  if (!secret?.trim()) {
+  const secret = process.env.CMS_API_SECRET?.trim();
+  if (!secret) {
     throw new Error(
       'CMS_API_SECRET environment variable is not set. Set it in .env.local.',
     );
   }
-  return secret.trim();
+  return secret;
 }
 
 function authHeader(): { Authorization: string } {
@@ -80,7 +92,7 @@ export interface PatchKnowledgeDocumentBody {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Fetch knowledge documents from the CMS.
+ * Fetch knowledge documents from the CMS filtered by status.
  *
  * @param status - Filter by processing status (default: `"pending"`).
  * @param limit  - Maximum number of documents to return (default: 50, max: 200).
@@ -95,10 +107,7 @@ export async function fetchKnowledgeDocuments(
 
   const res = await fetch(url.toString(), {
     method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeader(),
-    },
+    headers: { 'Content-Type': 'application/json', ...authHeader() },
   });
 
   if (!res.ok) {
@@ -112,6 +121,56 @@ export async function fetchKnowledgeDocuments(
 }
 
 /**
+ * Fetch a single knowledge document by its ID.
+ *
+ * Uses GET /api/chatbot/knowledge?id=<documentId> if the CMS supports it,
+ * falling back to a status=pending fetch and local filter.
+ *
+ * Returns `null` if no document with that ID is found.
+ *
+ * @param documentId - The CMS document ID to look up.
+ */
+export async function fetchDocumentById(
+  documentId: string,
+): Promise<KnowledgeDocument | null> {
+  // Try the direct ?id= endpoint first (CMS may or may not support it).
+  const url = new URL(`${getCmsBaseUrl()}/api/chatbot/knowledge`);
+  url.searchParams.set('id', documentId);
+
+  const res = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json', ...authHeader() },
+  });
+
+  if (res.ok) {
+    const body = await res.json() as KnowledgeDocument | KnowledgeDocument[] | null;
+    // CMS may return a single doc or an array.
+    if (Array.isArray(body)) {
+      return body.find((d) => d.id === documentId) ?? null;
+    }
+    if (body && typeof body === 'object' && 'id' in body) {
+      return (body as KnowledgeDocument).id === documentId
+        ? (body as KnowledgeDocument)
+        : null;
+    }
+    return null;
+  }
+
+  // If the CMS returned 404 or doesn't support ?id=, fall back to a
+  // full pending fetch and filter locally.  This ensures compatibility
+  // with CMS implementations that only expose the status-filtered endpoint.
+  if (res.status === 404 || res.status === 400) {
+    const docs = await fetchKnowledgeDocuments('pending', 200);
+    return docs.find((d) => d.id === documentId) ?? null;
+  }
+
+  const text = await res.text().catch(() => '');
+  throw new Error(
+    `CMS GET /api/chatbot/knowledge?id=${documentId} error: HTTP ${res.status}${text ? ` — ${text}` : ''}`,
+  );
+}
+
+/**
  * Update the processing status of a knowledge document.
  *
  * @param body - `{ id, status, error_message? }`
@@ -122,10 +181,7 @@ export async function patchKnowledgeDocument(
 ): Promise<KnowledgeDocument> {
   const res = await fetch(`${getCmsBaseUrl()}/api/chatbot/knowledge`, {
     method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeader(),
-    },
+    headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: JSON.stringify(body),
   });
 

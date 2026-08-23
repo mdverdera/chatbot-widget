@@ -8,41 +8,34 @@ import type {
 import { verifyWidgetToken } from '@/lib/token';
 import { checkRateLimit } from '@/lib/rate-limiter';
 import { setCorsOrigin } from '@/lib/cors';
-import { MOCK_RESPONSE_DELAY_MS } from '@/lib/constants';
+import { runRagPipeline } from '@/lib/rag-pipeline';
 
 /**
  * POST /api/chat/message
  *
+ * Receives a user message, verifies the widget JWT, extracts the tenant ID
+ * from the token's `tid` claim, and runs the RAG pipeline to produce a
+ * knowledge-grounded answer.
+ *
  * Security:
  *   - Requires a valid Bearer token in the Authorization header.
  *   - Token is verified: signature (HMAC-SHA-256), expiry, widgetId binding,
- *     and origin binding.
+ *     origin binding, and tenantId claim (`tid`).
  *   - Rate-limited per IP to prevent abuse.
  *   - Requests with missing / invalid tokens are rejected with 401.
  *
- * Phase 4+: replace mock response logic with an LLM call over the knowledge
- * documents synced from the CMS via GET /api/chatbot/knowledge.
+ * Tenant isolation:
+ *   - The `tid` claim from the verified JWT is the sole source of tenantId.
+ *   - It is passed directly to runRagPipeline(), which forwards it to
+ *     searchVectors() as a mandatory scope filter.
+ *   - Cross-tenant knowledge retrieval is architecturally impossible.
+ *
+ * RAG flow:
+ *   1. Embed the user's message.
+ *   2. Search the tenant's vector store.
+ *   3. If no chunk clears SIMILARITY_THRESHOLD → return FALLBACK_MESSAGE.
+ *   4. Otherwise, inject context into system prompt → call LLM → return reply.
  */
-
-// ── Mock response logic ───────────────────────────────────────────────────────
-// Phase 4+: replace this block with an LLM-backed handler.
-
-const MOCK_RESPONSES: string[] = [
-  "Thanks for your message! I'm a demo assistant — real AI responses are coming soon.",
-  "That's a great question. Our team will be able to help you with that shortly.",
-  "I've noted your query. Is there anything else you'd like to know?",
-  "Sure! Let me look that up for you. (This is a mock response for now.)",
-  "Interesting! Could you tell me a bit more about what you're looking for?",
-  "Got it! In a future version I'll connect to a live knowledge base to answer that properly.",
-];
-
-function getMockReply(userMessage: string): string {
-  let hash = 0;
-  for (let i = 0; i < userMessage.length; i++) {
-    hash = (hash * 31 + userMessage.charCodeAt(i)) >>> 0;
-  }
-  return MOCK_RESPONSES[hash % MOCK_RESPONSES.length]!;
-}
 
 // ── Validation helpers ────────────────────────────────────────────────────────
 
@@ -141,24 +134,41 @@ export default async function handler(
       .json({ error: 'Invalid or expired token', code: 'INVALID_TOKEN' });
   }
 
+  // ── Extract tenantId from verified token ──────────────────────────────────
+  // `tid` is guaranteed non-empty by verifyWidgetToken().
+  // This is the sole source of tenantId — it is never taken from the request body.
+  const tenantId = tokenResult.payload.tid;
+
   // ── Handle session ID ─────────────────────────────────────────────────────
   const sessionId =
     typeof body.sessionId === 'string' && body.sessionId.trim().length > 0
       ? body.sessionId
       : uuidv4();
 
-  // ── Mock response (Phase 4+: replace with LLM call) ──────────────────────
-  await new Promise<void>((resolve) =>
-    setTimeout(resolve, MOCK_RESPONSE_DELAY_MS),
-  );
+  // ── RAG pipeline ──────────────────────────────────────────────────────────
+  // Embeds question → tenant-scoped vector search → LLM call (or fallback).
+  const outcome = await runRagPipeline({
+    tenantId,
+    question: body.message,
+  });
 
-  const reply = getMockReply(body.message);
+  if (outcome.status === 'answered') {
+    console.log(
+      `[chat/message] tenant=${tenantId} widget=${body.widgetId} ` +
+      `chunks=${outcome.chunksUsed} status=answered`,
+    );
+  } else {
+    console.log(
+      `[chat/message] tenant=${tenantId} widget=${body.widgetId} ` +
+      `status=${outcome.status}${outcome.status === 'error' ? ` error="${outcome.error}"` : ''}`,
+    );
+  }
 
   // Set origin-bound CORS header only for the validated origin.
   setCorsOrigin(req, res, body.widgetId);
 
   return res.status(200).json({
-    reply,
+    reply:     outcome.reply,
     sessionId,
     messageId: uuidv4(),
     timestamp: Date.now(),

@@ -39,22 +39,29 @@ export interface WidgetTokenPayload extends JWTPayload {
   wid: string;
   /** The normalised origin that requested the token. */
   org: string;
+  /**
+   * The CMS tenant that owns this widget.
+   * Carried in the JWT so every downstream handler can scope knowledge
+   * retrieval to the correct tenant without an extra registry lookup.
+   */
+  tid: string;
 }
 
 // ── Issue ────────────────────────────────────────────────────────────────────
 
 /**
- * Sign a new short-lived token for a validated widget + origin pair.
+ * Sign a new short-lived token for a validated widget + origin + tenant triple.
  * Call this only from server-side code after passing origin validation.
  */
 export async function issueWidgetToken(
   widgetId: string,
   origin: string,
+  tenantId: string,
 ): Promise<string> {
   const secret = getSecret();
   const now = Math.floor(Date.now() / 1000);
 
-  return new SignJWT({ wid: widgetId, org: origin.toLowerCase() })
+  return new SignJWT({ wid: widgetId, org: origin.toLowerCase(), tid: tenantId })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt(now)
     .setExpirationTime(now + TOKEN_TTL_SECONDS)
@@ -78,6 +85,7 @@ export type TokenVerifyResult =
  *   - Issuer and audience
  *   - `wid` claim matches the widgetId in the request body
  *   - `org` claim matches the `Origin` header of the current request
+ *   - `tid` claim is present (non-empty tenantId)
  */
 export async function verifyWidgetToken(
   token: string,
@@ -110,6 +118,11 @@ export async function verifyWidgetToken(
   const origin = (requestOrigin ?? '').trim().toLowerCase();
   if (!origin || payload.org !== origin) {
     return { valid: false, reason: 'Token origin mismatch' };
+  }
+
+  // Ensure tenantId claim is present
+  if (!payload.tid || typeof payload.tid !== 'string' || !payload.tid.trim()) {
+    return { valid: false, reason: 'Token missing tenantId claim' };
   }
 
   return { valid: true, payload };
