@@ -150,7 +150,7 @@ export async function processDocument(
 
     // ── Step 6: Remove any pre-existing vectors for this document ───────────
     // Handles re-processing (e.g. document updated in CMS).
-    deleteDocumentVectors(documentId, tenantId);
+    await deleteDocumentVectors(documentId, tenantId);
 
     // ── Step 7: Store vectors ───────────────────────────────────────────────
     const vectorEntries = chunks.map((chunk, i) => ({
@@ -161,7 +161,7 @@ export async function processDocument(
       chunkIndex:  chunk.index,
     }));
 
-    storeVectors(vectorEntries);
+    await storeVectors(vectorEntries);
 
     // ── Step 8: Mark document as 'completed' ────────────────────────────────
     await reportStatusToCms(documentId, 'completed');
@@ -190,10 +190,10 @@ export async function processDocument(
  * @param tenantId   - Owning tenant (used for index cleanup + validation).
  * @returns          Number of vector chunks removed.
  */
-export function removeDocumentKnowledge(
+export async function removeDocumentKnowledge(
   documentId: string,
   tenantId: string,
-): number {
+): Promise<number> {
   return deleteDocumentVectors(documentId, tenantId);
 }
 

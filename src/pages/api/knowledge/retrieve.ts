@@ -110,7 +110,7 @@ export default async function handler(
   // ── Tenant-scoped vector search ────────────────────────────────────────────
   // SIMILARITY_THRESHOLD is used as the minimum score filter.
   // The vector store NEVER searches across tenants.
-  const results = searchVectors(tenantId, queryEmbedding, topK, SIMILARITY_THRESHOLD);
+  const results = await searchVectors(tenantId, queryEmbedding, topK, SIMILARITY_THRESHOLD);
 
   return res.status(200).json({ tenantId, results });
 }

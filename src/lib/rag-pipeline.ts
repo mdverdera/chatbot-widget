@@ -97,7 +97,7 @@ export async function runRagPipeline(input: RagInput): Promise<RagOutcome> {
   // ── Step 2: Tenant-scoped vector search ────────────────────────────────────
   // searchVectors() ONLY searches within the given tenantId.
   // Cross-tenant data is never accessible here.
-  const results = searchVectors(tenantId, queryEmbedding, RAG_TOP_K, SIMILARITY_THRESHOLD);
+  const results = await searchVectors(tenantId, queryEmbedding, RAG_TOP_K, SIMILARITY_THRESHOLD);
 
   console.log(
     `[rag-pipeline] tenant=${tenantId} | hits=${results.length} | ` +

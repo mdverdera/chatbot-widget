@@ -1,194 +1,226 @@
 /**
- * In-memory vector store — server-side only.
+ * Vector store — server-side only.
  *
- * Stores embedding vectors for document chunks with strict tenant isolation.
- * Every stored entry carries a `tenantId` and every query is filtered by
- * `tenantId` — cross-tenant retrieval is architecturally impossible.
+ * Persists and retrieves knowledge chunk embeddings using Supabase pgvector.
+ * The table schema is defined in supabase/migrations/001_ai_knowledge_chunks.sql.
  *
- * Storage strategy (Phase 4B):
- *   In-process Map for zero-infrastructure development/staging.
- *   Replace with a pgvector / Pinecone / Qdrant client in production.
+ * Table: ai_knowledge_chunks
+ *   id          uuid primary key
+ *   document_id text
+ *   tenant_id   text          ← every write and every query is scoped to this
+ *   content     text
+ *   embedding   vector(1536)  ← OpenAI text-embedding-3-small
+ *   chunk_index integer
+ *   created_at  timestamptz
  *
- * Thread-safety note:
- *   Node.js is single-threaded; no mutex needed for Map operations.
- *   In a multi-replica deployment, migrate to a shared vector database.
+ * Tenant isolation guarantee:
+ *   Every INSERT includes tenant_id.
+ *   Every SELECT filters by tenant_id via the match_knowledge_chunks() RPC.
+ *   Every DELETE filters by (document_id, tenant_id).
+ *   Cross-tenant queries are architecturally impossible from this module.
+ *
+ * OpenAI isolation guarantee:
+ *   This module receives pre-computed float[] vectors from embeddings.ts.
+ *   It never calls OpenAI directly — that separation is intentional.
  *
  * NEVER import this module from client-side code.
  */
 
-import { v4 as uuidv4 } from 'uuid';
-import type { VectorEntry, RetrievalResult } from '@/types/knowledge';
+import { getSupabaseClient } from '@/lib/supabase';
+import type { RetrievalResult } from '@/types/knowledge';
 
-// ── Storage ───────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-/** Primary store: vectorId → VectorEntry */
-const store = new Map<string, VectorEntry>();
+/** Shape of a row in ai_knowledge_chunks (subset used by this module). */
+interface ChunkRow {
+  id:          string;
+  document_id: string;
+  tenant_id:   string;
+  content:     string;
+  chunk_index: number;
+  created_at:  string;
+}
 
-/**
- * Secondary index: documentId → Set<vectorId>
- * Used for O(k) document deletion (k = number of chunks per document).
- */
-const docIndex = new Map<string, Set<string>>();
+/** Shape returned by match_knowledge_chunks() RPC. */
+interface MatchRow {
+  id:          string;
+  document_id: string;
+  content:     string;
+  chunk_index: number;
+  similarity:  number;
+}
 
-/**
- * Tertiary index: tenantId → Set<vectorId>
- * Enables tenant-scoped iteration without scanning the full store.
- */
-const tenantIndex = new Map<string, Set<string>>();
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Cosine similarity between two equal-length vectors.
- * Returns a value in [-1, 1]; higher is more similar.
- */
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-
-  for (let i = 0; i < a.length; i++) {
-    dot   += a[i]! * b[i]!;
-    normA += a[i]! * a[i]!;
-    normB += b[i]! * b[i]!;
-  }
-
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
+/** Input shape for storeVectors(). Mirrors the old VectorEntry minus id/storedAt. */
+export interface VectorInsert {
+  documentId:  string;
+  tenantId:    string;
+  text:        string;
+  embedding:   number[];
+  chunkIndex:  number;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Store a batch of vector entries.
- * Existing entries with the same (documentId, chunkIndex) are overwritten.
+ * Persist a batch of vector chunks for a document.
  *
- * @param entries - Array of VectorEntry objects (without `id` or `storedAt` —
- *                  those are assigned here).
+ * Accepts the same shape as the old in-memory store so knowledge-processor.ts
+ * requires no changes.
+ *
+ * @param entries - Array of chunks with pre-computed embeddings.
+ * @throws        On Supabase write error.
  */
-export function storeVectors(
-  entries: Omit<VectorEntry, 'id' | 'storedAt'>[],
-): VectorEntry[] {
-  const stored: VectorEntry[] = [];
-  const now = Date.now();
+export async function storeVectors(
+  entries: Omit<VectorInsert, never>[],
+): Promise<void> {
+  if (entries.length === 0) return;
 
-  for (const entry of entries) {
-    const id = uuidv4();
-    const full: VectorEntry = { ...entry, id, storedAt: now };
+  const supabase = getSupabaseClient();
 
-    store.set(id, full);
+  const rows = entries.map((e) => ({
+    document_id: e.documentId,
+    tenant_id:   e.tenantId,
+    content:     e.text,
+    embedding:   e.embedding,
+    chunk_index: e.chunkIndex,
+  }));
 
-    // Update document index.
-    let docSet = docIndex.get(entry.documentId);
-    if (!docSet) { docSet = new Set(); docIndex.set(entry.documentId, docSet); }
-    docSet.add(id);
+  const { error } = await supabase
+    .from('ai_knowledge_chunks')
+    .insert(rows);
 
-    // Update tenant index.
-    let tenantSet = tenantIndex.get(entry.tenantId);
-    if (!tenantSet) { tenantSet = new Set(); tenantIndex.set(entry.tenantId, tenantSet); }
-    tenantSet.add(id);
-
-    stored.push(full);
+  if (error) {
+    throw new Error(`[vector-store] storeVectors failed: ${error.message}`);
   }
-
-  return stored;
 }
 
 /**
- * Search for the most similar chunks within a single tenant's knowledge base.
- * Cross-tenant results are never returned.
+ * Cosine-similarity search within a single tenant's knowledge base.
  *
- * @param tenantId  - The tenant to search within (required, never omit).
- * @param queryVec  - The embedding of the user's query.
- * @param topK      - Maximum number of results to return (default: 5).
- * @param threshold - Minimum cosine similarity score to include (default: 0).
- * @returns         Results sorted by score descending.
+ * Calls the match_knowledge_chunks() Postgres function (defined in the migration)
+ * which filters by tenant_id and applies the similarity threshold server-side,
+ * so no cross-tenant rows ever leave the database.
+ *
+ * @param tenantId  - Tenant to search within. NEVER omit.
+ * @param queryVec  - 1536-dimension embedding of the user's question.
+ * @param topK      - Maximum chunks to return (default: 5).
+ * @param threshold - Minimum cosine similarity [0–1] (default: 0).
+ * @returns         Results sorted by similarity descending.
  */
-export function searchVectors(
-  tenantId: string,
-  queryVec: number[],
-  topK = 5,
-  threshold = 0,
-): RetrievalResult[] {
-  const tenantSet = tenantIndex.get(tenantId);
-  if (!tenantSet || tenantSet.size === 0) return [];
+export async function searchVectors(
+  tenantId:  string,
+  queryVec:  number[],
+  topK       = 5,
+  threshold  = 0,
+): Promise<RetrievalResult[]> {
+  const supabase = getSupabaseClient();
 
-  const scored: RetrievalResult[] = [];
+  const { data, error } = await supabase.rpc('match_knowledge_chunks', {
+    query_embedding: queryVec,
+    p_tenant_id:     tenantId,
+    match_threshold: threshold,
+    match_count:     topK,
+  });
 
-  for (const vectorId of tenantSet) {
-    const entry = store.get(vectorId);
-    if (!entry) continue;  // Stale index entry — skip.
-
-    const score = cosineSimilarity(queryVec, entry.embedding);
-    if (score < threshold) continue;
-
-    scored.push({
-      id:          entry.id,
-      text:        entry.text,
-      score,
-      documentId:  entry.documentId,
-      chunkIndex:  entry.chunkIndex,
-    });
+  if (error) {
+    throw new Error(`[vector-store] searchVectors failed: ${error.message}`);
   }
 
-  // Sort descending by score, trim to topK.
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, topK);
+  const rows = (data ?? []) as MatchRow[];
+
+  return rows.map((row) => ({
+    id:          row.id,
+    text:        row.content,
+    score:       row.similarity,
+    documentId:  row.document_id,
+    chunkIndex:  row.chunk_index,
+  }));
 }
 
 /**
- * Delete all vector chunks belonging to a specific document.
- * Cleans up both the primary store and all secondary indexes.
+ * Delete all vector chunks for a document, scoped to a tenant.
+ *
+ * Filters by BOTH document_id AND tenant_id — a document from tenant-A
+ * cannot delete chunks owned by tenant-B even if document IDs collide.
  *
  * @param documentId - CMS document ID whose chunks should be removed.
- * @param tenantId   - Owning tenant (for index cleanup).
- * @returns          Number of vector entries deleted.
+ * @param tenantId   - Owning tenant.
+ * @returns          Number of rows deleted.
  */
-export function deleteDocumentVectors(
+export async function deleteDocumentVectors(
   documentId: string,
-  tenantId: string,
-): number {
-  const vectorIds = docIndex.get(documentId);
-  if (!vectorIds || vectorIds.size === 0) return 0;
+  tenantId:   string,
+): Promise<number> {
+  const supabase = getSupabaseClient();
 
-  const tenantSet = tenantIndex.get(tenantId);
-  let count = 0;
+  const { data, error } = await supabase
+    .from('ai_knowledge_chunks')
+    .delete()
+    .eq('document_id', documentId)
+    .eq('tenant_id',   tenantId)
+    .select('id');          // ask Supabase to return the deleted rows so we can count them
 
-  for (const vectorId of vectorIds) {
-    store.delete(vectorId);
-    tenantSet?.delete(vectorId);
-    count++;
+  if (error) {
+    throw new Error(`[vector-store] deleteDocumentVectors failed: ${error.message}`);
   }
 
-  docIndex.delete(documentId);
-
-  // Clean up tenant set if empty.
-  if (tenantSet?.size === 0) tenantIndex.delete(tenantId);
-
-  return count;
+  return (data ?? []).length;
 }
 
 /**
- * Return a snapshot of store statistics (for diagnostics / health checks).
- * Never exposes raw vector data.
+ * Return store statistics scoped per tenant.
+ * Uses a SELECT COUNT(*) GROUP BY query — no embeddings are transferred.
  */
-export function getStoreStats(): {
-  totalVectors: number;
-  totalDocuments: number;
-  totalTenants: number;
+export async function getStoreStats(): Promise<{
+  totalVectors:     number;
+  totalDocuments:   number;
+  totalTenants:     number;
   vectorsPerTenant: Record<string, number>;
-} {
+}> {
+  const supabase = getSupabaseClient();
+
+  // Total vectors + total distinct documents
+  const { count: totalVectors, error: countErr } = await supabase
+    .from('ai_knowledge_chunks')
+    .select('*', { count: 'exact', head: true });
+
+  if (countErr) {
+    throw new Error(`[vector-store] getStoreStats count failed: ${countErr.message}`);
+  }
+
+  // Per-tenant counts
+  const { data: tenantRows, error: tenantErr } = await supabase
+    .from('ai_knowledge_chunks')
+    .select('tenant_id');
+
+  if (tenantErr) {
+    throw new Error(`[vector-store] getStoreStats tenant query failed: ${tenantErr.message}`);
+  }
+
   const vectorsPerTenant: Record<string, number> = {};
-  for (const [tid, set] of tenantIndex.entries()) {
-    vectorsPerTenant[tid] = set.size;
+  const docSet = new Set<string>();
+
+  for (const row of (tenantRows ?? []) as Pick<ChunkRow, 'tenant_id'>[]) {
+    vectorsPerTenant[row.tenant_id] = (vectorsPerTenant[row.tenant_id] ?? 0) + 1;
+  }
+
+  // Total distinct documents — separate lightweight query
+  const { data: docRows, error: docErr } = await supabase
+    .from('ai_knowledge_chunks')
+    .select('document_id');
+
+  if (docErr) {
+    throw new Error(`[vector-store] getStoreStats doc query failed: ${docErr.message}`);
+  }
+
+  for (const row of (docRows ?? []) as Pick<ChunkRow, 'document_id'>[]) {
+    docSet.add(row.document_id);
   }
 
   return {
-    totalVectors:   store.size,
-    totalDocuments: docIndex.size,
-    totalTenants:   tenantIndex.size,
+    totalVectors:   totalVectors ?? 0,
+    totalDocuments: docSet.size,
+    totalTenants:   Object.keys(vectorsPerTenant).length,
     vectorsPerTenant,
   };
 }

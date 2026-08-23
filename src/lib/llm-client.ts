@@ -21,7 +21,7 @@ import OpenAI from 'openai';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const DEFAULT_LLM_MODEL       = 'gpt-4o-mini';
+const DEFAULT_LLM_MODEL       = 'gpt-4o';
 const DEFAULT_LLM_MAX_TOKENS  = 1024;
 const DEFAULT_LLM_TEMPERATURE = 0.2;
 
