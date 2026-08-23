@@ -33,7 +33,7 @@ import type { ApiErrorResponse } from '@/types/widget';
 
 type ResponseBody = DeleteDocumentResponse | ApiErrorResponse;
 
-export default function handler(
+export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<ResponseBody>,
 ) {
@@ -58,7 +58,7 @@ export default function handler(
   const { tenantId } = auth;
 
   // ── Delete vectors ─────────────────────────────────────────────────────────
-  const deletedChunks = removeDocumentKnowledge(documentId.trim(), tenantId);
+  const deletedChunks = await removeDocumentKnowledge(documentId.trim(), tenantId);
 
   if (deletedChunks === 0) {
     return res.status(404).json({
