@@ -13,18 +13,19 @@ import { MOCK_RESPONSE_DELAY_MS } from '@/lib/constants';
 /**
  * POST /api/chat/message
  *
- * Phase 3 security:
+ * Security:
  *   - Requires a valid Bearer token in the Authorization header.
  *   - Token is verified: signature (HMAC-SHA-256), expiry, widgetId binding,
  *     and origin binding.
  *   - Rate-limited per IP to prevent abuse.
  *   - Requests with missing / invalid tokens are rejected with 401.
  *
- * Phase 4+: replace mock response logic with a real LLM call.
+ * Phase 4+: replace mock response logic with an LLM call over the knowledge
+ * documents synced from the CMS via GET /api/chatbot/knowledge.
  */
 
 // ── Mock response logic ───────────────────────────────────────────────────────
-// Phase 4+: replace this block with an LLM / CMS-backed handler.
+// Phase 4+: replace this block with an LLM-backed handler.
 
 const MOCK_RESPONSES: string[] = [
   "Thanks for your message! I'm a demo assistant — real AI responses are coming soon.",
