@@ -20,6 +20,11 @@
  *   chat message handler and passed here.  It is used as the mandatory
  *   scope argument to `searchVectors()` — a global search is never issued.
  *
+ * Phase 5B additions:
+ *   - Structured logging via logger.ts (replaces console.log).
+ *   - Monitoring hook emission for RAG and LLM errors.
+ *   - tenantId forwarded to embeddings + LLM for usage tracking.
+ *
  * NEVER import this module from client-side code.
  */
 
@@ -33,6 +38,10 @@ import {
   SIMILARITY_THRESHOLD,
 } from '@/lib/rag-config';
 import { classifyIntent } from '@/lib/intent-classifier';
+import { createLogger } from '@/lib/logger';
+import { monitorRagError, monitorLlmError } from '@/lib/monitoring';
+
+const log = createLogger('rag-pipeline');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -74,19 +83,21 @@ export async function runRagPipeline(input: RagInput): Promise<RagOutcome> {
   // questions before the Embeddings API or LLM are ever touched.
   const intentResult = classifyIntent(question);
   if (intentResult.intent !== 'question') {
-    console.log(
-      `[rag-pipeline] tenant=${tenantId} | intent=${intentResult.intent} | skipping RAG`,
-    );
+    log.debug('Intent classified — skipping RAG', {
+      tenantId,
+      intent: intentResult.intent,
+    });
     return { status: 'greeting', reply: intentResult.reply! };
   }
 
   // ── Step 1: Embed the question ─────────────────────────────────────────────
   let queryEmbedding: number[];
   try {
-    queryEmbedding = await generateEmbedding(question);
+    queryEmbedding = await generateEmbedding(question, tenantId);
   } catch (err) {
     const error = err instanceof Error ? err.message : 'Embedding failed';
-    console.error(`[rag-pipeline] Embedding error (tenant: ${tenantId}):`, err);
+    log.error('Embedding error', { tenantId }, err);
+    monitorRagError('rag-pipeline', error, tenantId);
     return {
       status: 'error',
       reply:  FALLBACK_MESSAGE,
@@ -102,19 +113,35 @@ export async function runRagPipeline(input: RagInput): Promise<RagOutcome> {
   // of score. We log the raw scores first (for diagnostics), then apply
   // SIMILARITY_THRESHOLD in JS. This ensures the log line always shows what
   // the top scores actually are — even when they fall below the threshold.
-  const rawResults = await searchVectors(tenantId, queryEmbedding, RAG_TOP_K, 0);
+  let rawResults;
+  try {
+    rawResults = await searchVectors(tenantId, queryEmbedding, RAG_TOP_K, 0);
+  } catch (err) {
+    const error = err instanceof Error ? err.message : 'Vector search failed';
+    log.error('Vector search error', { tenantId }, err);
+    monitorRagError('rag-pipeline', error, tenantId);
+    return {
+      status: 'error',
+      reply:  FALLBACK_MESSAGE,
+      error,
+    };
+  }
 
   const topScores = rawResults.map((r) => r.score.toFixed(3)).join(', ');
-  console.log(
-    `[rag-pipeline] tenant=${tenantId} | rawHits=${rawResults.length} | ` +
-    `topScores=[${topScores || 'none'}] | threshold=${SIMILARITY_THRESHOLD}`,
-  );
+  log.debug('Vector search complete', {
+    tenantId,
+    rawHits:   rawResults.length,
+    topScores: topScores || 'none',
+    threshold: SIMILARITY_THRESHOLD,
+  });
 
   // ── Step 3: Threshold check ────────────────────────────────────────────────
   const results = rawResults.filter((r) => r.score >= SIMILARITY_THRESHOLD);
-  console.log(
-    `[rag-pipeline] tenant=${tenantId} | hitsAboveThreshold=${results.length}`,
-  );
+  log.debug('Threshold filter applied', {
+    tenantId,
+    hitsAboveThreshold: results.length,
+  });
+
   if (results.length === 0) {
     return { status: 'fallback', reply: FALLBACK_MESSAGE };
   }
@@ -127,13 +154,17 @@ export async function runRagPipeline(input: RagInput): Promise<RagOutcome> {
   // ── Step 5: Call the LLM ───────────────────────────────────────────────────
   let reply: string;
   try {
-    reply = await callLlm([
-      { role: 'system', content: systemPrompt },
-      { role: 'user',   content: question },
-    ]);
+    reply = await callLlm(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: question },
+      ],
+      { tenantId },
+    );
   } catch (err) {
     const error = err instanceof Error ? err.message : 'LLM call failed';
-    console.error(`[rag-pipeline] LLM error (tenant: ${tenantId}):`, err);
+    log.error('LLM error', { tenantId }, err);
+    monitorLlmError('rag-pipeline', error, tenantId);
     return {
       status: 'error',
       reply:  FALLBACK_MESSAGE,

@@ -3,6 +3,8 @@ import { validateWidgetOrigin } from '@/lib/widget-registry';
 import { issueWidgetToken, TOKEN_TTL_SECONDS } from '@/lib/token';
 import { checkRateLimit } from '@/lib/rate-limiter';
 import { setCorsOrigin } from '@/lib/cors';
+import { createLogger, logRequest, logAuthFailure } from '@/lib/logger';
+import { monitorAuthFailure } from '@/lib/monitoring';
 import type { ApiErrorResponse } from '@/types/widget';
 
 /**
@@ -20,9 +22,15 @@ import type { ApiErrorResponse } from '@/types/widget';
  *   - The JWT binds to both the widgetId and the origin — tokens cannot be
  *     replayed from a different origin or against a different widget.
  *
+ * Error responses:
+ *   - All error messages are safe (no stack traces, no internal details).
+ *
  * Request body: { widgetId: string }
  * Response:     { token: string; expiresIn: number }
  */
+
+const COMPONENT = 'auth/widget-token';
+const log = createLogger(COMPONENT);
 
 interface TokenResponse {
   token: string;
@@ -38,6 +46,8 @@ export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<TokenResponse | ApiErrorResponse>,
 ) {
+  const startMs = Date.now();
+
   // ── CORS pre-flight ───────────────────────────────────────────────────────
   // For OPTIONS we can't validate the widgetId (body not sent), so we permit
   // the pre-flight and let the actual POST enforce the full check.
@@ -62,6 +72,11 @@ export default async function handler(
   const widgetId = typeof body.widgetId === 'string' ? body.widgetId.trim() : '';
   const origin   = req.headers.origin;
 
+  const ip =
+    (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ??
+    req.socket.remoteAddress ??
+    'unknown';
+
   if (!widgetId) {
     return res
       .status(400)
@@ -73,6 +88,7 @@ export default async function handler(
   const rate    = checkRateLimit(rateKey, TOKEN_RATE_LIMIT, TOKEN_RATE_WINDOW);
   if (!rate.allowed) {
     res.setHeader('Retry-After', String(rate.retryAfterSeconds));
+    log.warn('Rate limit exceeded for token request', { widgetId, ip });
     return res.status(429).json({
       error: 'Too many token requests. Please slow down.',
       code: 'RATE_LIMITED',
@@ -82,6 +98,8 @@ export default async function handler(
   // ── Widget ID + origin validation ─────────────────────────────────────────
   const validation = validateWidgetOrigin(widgetId, origin);
   if (!validation.valid) {
+    logAuthFailure(COMPONENT, validation.reason, { widgetId, origin: origin ?? 'none', ip });
+    monitorAuthFailure(COMPONENT, validation.reason);
     // Intentionally vague to avoid leaking registry information.
     return res.status(403).json({
       error: 'Unauthorized',
@@ -96,9 +114,21 @@ export default async function handler(
     const token = await issueWidgetToken(widgetId, origin!, validation.record.tenantId);
     // Set origin-bound CORS header only for the validated origin.
     setCorsOrigin(req, res, widgetId);
+
+    logRequest({
+      component: COMPONENT,
+      method:    req.method!,
+      path:      '/api/auth/widget-token',
+      status:    200,
+      ip,
+      widgetId,
+      tenantId:  validation.record.tenantId,
+      durationMs: Date.now() - startMs,
+    });
+
     return res.status(200).json({ token, expiresIn: TOKEN_TTL_SECONDS });
   } catch (err) {
-    console.error('[widget-token] Failed to issue token:', err);
+    log.error('Failed to issue token', { widgetId }, err);
     return res.status(500).json({
       error: 'Internal server error',
       code: 'SERVER_ERROR',

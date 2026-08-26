@@ -4,20 +4,24 @@ import { generateEmbedding } from '@/lib/embeddings';
 import { searchVectors } from '@/lib/vector-store';
 import { SIMILARITY_THRESHOLD } from '@/lib/rag-config';
 import { checkRateLimit } from '@/lib/rate-limiter';
+import { createLogger } from '@/lib/logger';
+import { monitorRagError } from '@/lib/monitoring';
 import type { RetrieveKnowledgeRequest, RetrieveKnowledgeResponse } from '@/types/knowledge';
 import type { ApiErrorResponse } from '@/types/widget';
 
 /**
  * POST /api/knowledge/retrieve
  *
- * Retrieves the most relevant knowledge chunks for a given query, scoped
- * strictly to the authenticated tenant.  Cross-tenant retrieval is impossible:
- * the tenantId drives the vector store filter and is verified server-side.
+ * Internal-only endpoint.  Retrieves the most relevant knowledge chunks for
+ * a given query, scoped strictly to the authenticated tenant.
  *
- * This endpoint is intended for internal use — called by the chat message
- * handler (Phase 4C+) when building an LLM prompt.  The CMS authenticates
- * with Bearer <CMS_API_SECRET>, but in practice the chatbot's own message
- * handler will call it with the same secret (it runs in the same process).
+ * ⚠  INTERNAL USE ONLY ⚠
+ * This endpoint is intended for server-to-server calls within the chatbot
+ * service.  It MUST NOT be called from client-side JavaScript.
+ * Authentication requires Bearer <CMS_API_SECRET> — never expose this secret.
+ *
+ * Cross-tenant retrieval is impossible: the tenantId drives the vector store
+ * filter and is verified server-side before any search is performed.
  *
  * Authentication:
  *   Bearer <CMS_API_SECRET> in the Authorization header.
@@ -35,14 +39,15 @@ import type { ApiErrorResponse } from '@/types/widget';
  *     results: [{ id, text, score, documentId, chunkIndex }]
  *   }
  *
- * Results are filtered by SIMILARITY_THRESHOLD and sorted by score descending.
- * An empty results array means no relevant knowledge was found for this tenant.
- *
  * Security:
  *   - Requires valid CMS_API_SECRET.
  *   - tenantId is validated before any vector search.
  *   - The vector store enforces per-tenant isolation independently.
+ *   - Error responses never expose internal details.
  */
+
+const COMPONENT = 'knowledge/retrieve';
+const log = createLogger(COMPONENT);
 
 const DEFAULT_TOP_K = 5;
 const MAX_TOP_K     = 20;
@@ -74,6 +79,7 @@ export default async function handler(
   const rate = checkRateLimit(`retrieve:${tenantId}`, RETRIEVE_RATE_LIMIT, RETRIEVE_RATE_WINDOW);
   if (!rate.allowed) {
     res.setHeader('Retry-After', String(rate.retryAfterSeconds));
+    log.warn('Rate limit exceeded', { tenantId });
     return res.status(429).json({ error: 'Too many requests. Please slow down.', code: 'RATE_LIMITED' });
   }
 
@@ -100,17 +106,25 @@ export default async function handler(
   // ── Embed the query ────────────────────────────────────────────────────────
   let queryEmbedding: number[];
   try {
-    queryEmbedding = await generateEmbedding(query.trim());
+    queryEmbedding = await generateEmbedding(query.trim(), tenantId);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Embedding generation failed';
-    console.error('[knowledge/retrieve] Embedding error:', err);
-    return res.status(500).json({ error: msg, code: 'SERVER_ERROR' });
+    log.error('Embedding error in retrieve', { tenantId }, err);
+    monitorRagError(COMPONENT, err instanceof Error ? err.message : 'Embedding failed', tenantId);
+    // Return a safe error message — never expose the underlying error.
+    return res.status(500).json({ error: 'Failed to process query', code: 'SERVER_ERROR' });
   }
 
   // ── Tenant-scoped vector search ────────────────────────────────────────────
   // SIMILARITY_THRESHOLD is used as the minimum score filter.
   // The vector store NEVER searches across tenants.
-  const results = await searchVectors(tenantId, queryEmbedding, topK, SIMILARITY_THRESHOLD);
+  let results;
+  try {
+    results = await searchVectors(tenantId, queryEmbedding, topK, SIMILARITY_THRESHOLD);
+  } catch (err) {
+    log.error('Vector search error in retrieve', { tenantId }, err);
+    monitorRagError(COMPONENT, err instanceof Error ? err.message : 'Vector search failed', tenantId);
+    return res.status(500).json({ error: 'Failed to retrieve knowledge', code: 'SERVER_ERROR' });
+  }
 
   return res.status(200).json({ tenantId, results });
 }

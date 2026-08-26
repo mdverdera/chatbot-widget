@@ -9,6 +9,8 @@ import { verifyWidgetToken } from '@/lib/token';
 import { checkRateLimit } from '@/lib/rate-limiter';
 import { setCorsOrigin } from '@/lib/cors';
 import { runRagPipeline } from '@/lib/rag-pipeline';
+import { createLogger, logRequest, logAuthFailure } from '@/lib/logger';
+import { monitorAuthFailure } from '@/lib/monitoring';
 
 /**
  * POST /api/chat/message
@@ -26,6 +28,7 @@ import { runRagPipeline } from '@/lib/rag-pipeline';
  *
  * Tenant isolation:
  *   - The `tid` claim from the verified JWT is the sole source of tenantId.
+ *   - It is NEVER taken from the request body or query string.
  *   - It is passed directly to runRagPipeline(), which forwards it to
  *     searchVectors() as a mandatory scope filter.
  *   - Cross-tenant knowledge retrieval is architecturally impossible.
@@ -35,7 +38,13 @@ import { runRagPipeline } from '@/lib/rag-pipeline';
  *   2. Search the tenant's vector store.
  *   3. If no chunk clears SIMILARITY_THRESHOLD → return FALLBACK_MESSAGE.
  *   4. Otherwise, inject context into system prompt → call LLM → return reply.
+ *
+ * Error responses:
+ *   - All error messages are safe (no stack traces, no internal details).
  */
+
+const COMPONENT = 'chat/message';
+const log = createLogger(COMPONENT);
 
 // ── Validation helpers ────────────────────────────────────────────────────────
 
@@ -58,6 +67,15 @@ function extractBearerToken(authHeader: string | undefined): string | null {
   return match ? (match[1] ?? null) : null;
 }
 
+/** Extract the client IP, preferring the leftmost forwarded address. */
+function extractIp(req: NextApiRequest): string {
+  return (
+    (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ??
+    req.socket.remoteAddress ??
+    'unknown'
+  );
+}
+
 // ── Rate-limit config ─────────────────────────────────────────────────────────
 // 60 messages per IP per minute.
 const CHAT_RATE_LIMIT  = 60;
@@ -69,6 +87,9 @@ export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<SendMessageResponse | ApiErrorResponse>,
 ) {
+  const startMs = Date.now();
+  const ip = extractIp(req);
+
   // ── CORS pre-flight ───────────────────────────────────────────────────────
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin ?? '*');
@@ -87,14 +108,10 @@ export default async function handler(
   }
 
   // ── Rate limit by IP ──────────────────────────────────────────────────────
-  const ip =
-    (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ??
-    req.socket.remoteAddress ??
-    'unknown';
-
   const rate = checkRateLimit(`chat:${ip}`, CHAT_RATE_LIMIT, CHAT_RATE_WINDOW);
   if (!rate.allowed) {
     res.setHeader('Retry-After', String(rate.retryAfterSeconds));
+    log.warn('Rate limit exceeded', { ip, remaining: 0 });
     return res.status(429).json({
       error: 'Too many requests. Please slow down.',
       code: 'RATE_LIMITED',
@@ -122,6 +139,8 @@ export default async function handler(
   const origin = req.headers.origin;
 
   if (!token) {
+    logAuthFailure(COMPONENT, 'Missing token', { widgetId: body.widgetId, ip });
+    monitorAuthFailure(COMPONENT, 'Missing token');
     return res
       .status(401)
       .json({ error: 'Authorization token required', code: 'MISSING_TOKEN' });
@@ -129,10 +148,12 @@ export default async function handler(
 
   const tokenResult = await verifyWidgetToken(token, body.widgetId, origin);
   if (!tokenResult.valid) {
-    console.warn(
-      `[chat/message] Token rejected — reason: "${tokenResult.reason}" | ` +
-      `widgetId: "${body.widgetId}" | origin: "${origin ?? 'none'}"`,
-    );
+    logAuthFailure(COMPONENT, tokenResult.reason, {
+      widgetId: body.widgetId,
+      origin:   origin ?? 'none',
+      ip,
+    });
+    monitorAuthFailure(COMPONENT, tokenResult.reason);
     return res
       .status(401)
       .json({ error: 'Invalid or expired token', code: 'INVALID_TOKEN' });
@@ -140,7 +161,7 @@ export default async function handler(
 
   // ── Extract tenantId from verified token ──────────────────────────────────
   // `tid` is guaranteed non-empty by verifyWidgetToken().
-  // This is the sole source of tenantId — it is never taken from the request body.
+  // This is the sole source of tenantId — NEVER taken from the request body.
   const tenantId = tokenResult.payload.tid;
 
   // ── Handle session ID ─────────────────────────────────────────────────────
@@ -151,21 +172,54 @@ export default async function handler(
 
   // ── RAG pipeline ──────────────────────────────────────────────────────────
   // Embeds question → tenant-scoped vector search → LLM call (or fallback).
-  const outcome = await runRagPipeline({
+  let outcome;
+  try {
+    outcome = await runRagPipeline({
+      tenantId,
+      question: body.message,
+    });
+  } catch (err) {
+    // runRagPipeline never throws, but guard against the unexpected.
+    log.error('Unexpected error in RAG pipeline', { tenantId, widgetId: body.widgetId }, err);
+    return res.status(500).json({
+      error: 'An error occurred processing your request.',
+      code: 'SERVER_ERROR',
+    });
+  }
+
+  const durationMs = Date.now() - startMs;
+
+  logRequest({
+    component: COMPONENT,
+    method:    req.method,
+    path:      '/api/chat/message',
+    status:    200,
+    ip,
     tenantId,
-    question: body.message,
+    widgetId:  body.widgetId,
+    durationMs,
   });
 
   if (outcome.status === 'answered') {
-    console.log(
-      `[chat/message] tenant=${tenantId} widget=${body.widgetId} ` +
-      `chunks=${outcome.chunksUsed} status=answered`,
-    );
+    log.info('Chat message answered', {
+      tenantId,
+      widgetId:   body.widgetId,
+      chunksUsed: outcome.chunksUsed,
+      durationMs,
+    });
+  } else if (outcome.status === 'error') {
+    log.warn('Chat message pipeline error', {
+      tenantId,
+      widgetId: body.widgetId,
+      durationMs,
+    });
   } else {
-    console.log(
-      `[chat/message] tenant=${tenantId} widget=${body.widgetId} ` +
-      `status=${outcome.status}${outcome.status === 'error' ? ` error="${outcome.error}"` : ''}`,
-    );
+    log.debug('Chat message handled', {
+      tenantId,
+      widgetId: body.widgetId,
+      status:   outcome.status,
+      durationMs,
+    });
   }
 
   // Set origin-bound CORS header only for the validated origin.

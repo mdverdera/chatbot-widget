@@ -20,7 +20,7 @@ export default function Home() {
   return (
     <>
       <Head>
-        <title>Chatbot Widget — Phase 3 Demo</title>
+        <title>Chatbot Widget — Phase 5</title>
         <meta name="description" content="Embeddable chatbot widget demo" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
@@ -33,7 +33,7 @@ export default function Home() {
               Chatbot Widget
             </h1>
             <p className="text-sm text-gray-500 mt-0.5">
-              Phase 3 — Secure widget integration
+              Phase 5 — Production Runtime, Security &amp; Monitoring
             </p>
           </div>
         </header>
@@ -159,13 +159,13 @@ export default function Home() {
                 },
                 {
                   phase: 'Phase 4',
-                  label: 'LLM / AI integration',
-                  done: false,
+                  label: 'RAG/LLM integration — knowledge ingestion, vector search, AI responses',
+                  done: true,
                 },
                 {
                   phase: 'Phase 5',
-                  label: 'Conversation history & CMS dashboard',
-                  done: false,
+                  label: 'CMS Admin UI, production runtime, structured logging, health checks, monitoring hooks, LLM usage tracking',
+                  done: true,
                 },
               ].map(({ phase, label, done }) => (
                 <div key={phase} className="flex items-center gap-3">
@@ -188,7 +188,7 @@ export default function Home() {
         </main>
 
         <footer className="text-center text-xs text-gray-400 py-6 border-t border-gray-100">
-          Chatbot Widget · Phase 3
+          Chatbot Widget · Phase 5
         </footer>
       </div>
 

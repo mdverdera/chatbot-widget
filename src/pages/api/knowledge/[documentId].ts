@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireCmsAuth } from '@/lib/cms-auth';
 import { removeDocumentKnowledge } from '@/lib/knowledge-processor';
+import { createLogger } from '@/lib/logger';
 import type { DeleteDocumentResponse } from '@/types/knowledge';
 import type { ApiErrorResponse } from '@/types/widget';
 
@@ -29,7 +30,11 @@ import type { ApiErrorResponse } from '@/types/widget';
  *   - CMS_API_SECRET must match — 401 otherwise.
  *   - tenantId is verified against the secret before any deletion occurs.
  *   - Only vectors for the authenticated tenantId are touched.
+ *   - Error responses never expose internal details.
  */
+
+const COMPONENT = 'knowledge/delete';
+const log = createLogger(COMPONENT);
 
 type ResponseBody = DeleteDocumentResponse | ApiErrorResponse;
 
@@ -58,7 +63,16 @@ export default async function handler(
   const { tenantId } = auth;
 
   // ── Delete vectors ─────────────────────────────────────────────────────────
-  const deletedChunks = await removeDocumentKnowledge(documentId.trim(), tenantId);
+  let deletedChunks: number;
+  try {
+    deletedChunks = await removeDocumentKnowledge(documentId.trim(), tenantId);
+  } catch (err) {
+    log.error('Failed to delete document vectors', {
+      tenantId,
+      documentId: documentId.trim(),
+    }, err);
+    return res.status(500).json({ error: 'Failed to delete document', code: 'SERVER_ERROR' });
+  }
 
   if (deletedChunks === 0) {
     return res.status(404).json({
@@ -66,6 +80,12 @@ export default async function handler(
       code:  'NOT_FOUND',
     });
   }
+
+  log.info('Document vectors deleted', {
+    tenantId,
+    documentId:   documentId.trim(),
+    deletedChunks,
+  });
 
   return res.status(200).json({
     documentId: documentId.trim(),

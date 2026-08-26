@@ -2,6 +2,8 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireCmsAuth } from '@/lib/cms-auth';
 import { processDocument } from '@/lib/knowledge-processor';
 import { checkRateLimit } from '@/lib/rate-limiter';
+import { createLogger, logRequest } from '@/lib/logger';
+import { monitorProcessingError } from '@/lib/monitoring';
 import type { IngestDocumentRequest, IngestDocumentResponse } from '@/types/knowledge';
 import type { ApiErrorResponse } from '@/types/widget';
 
@@ -24,13 +26,11 @@ import type { ApiErrorResponse } from '@/types/widget';
  *     downloadUrl: string   — signed URL to fetch the file content
  *   }
  *
- * Response 202:
- *   { documentId, status: 'processing' }          (async processing started)
- *   { documentId, status: 'completed', chunkCount } (sync, if fast enough)
+ * Response 200:
+ *   { documentId, status: 'completed', chunkCount }
  *
- * The pipeline is run synchronously within the request so the CMS receives an
- * accurate final status.  For very large documents (Phase 5+) this should be
- * moved to a background job queue.
+ * Response 422:
+ *   { documentId, status: 'failed' }
  *
  * Security:
  *   - CMS_API_SECRET must match — 401 otherwise.
@@ -38,7 +38,13 @@ import type { ApiErrorResponse } from '@/types/widget';
  *   - Every stored vector chunk is tagged with tenantId.
  *   - Cross-tenant ingestion is impossible: the authenticated tenantId is the
  *     only one used for storage, regardless of what the CMS claims.
+ *
+ * Error responses:
+ *   - All error messages are safe (no stack traces, no internal details).
  */
+
+const COMPONENT = 'knowledge/ingest';
+const log = createLogger(COMPONENT);
 
 // Rate limit: 30 ingest requests per tenant per minute.
 const INGEST_RATE_LIMIT  = 30;
@@ -50,6 +56,8 @@ export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<ResponseBody>,
 ) {
+  const startMs = Date.now();
+
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
     return res.status(405).json({ error: 'Method not allowed', code: 'METHOD_NOT_ALLOWED' });
@@ -68,6 +76,7 @@ export default async function handler(
   const rate = checkRateLimit(`ingest:${tenantId}`, INGEST_RATE_LIMIT, INGEST_RATE_WINDOW);
   if (!rate.allowed) {
     res.setHeader('Retry-After', String(rate.retryAfterSeconds));
+    log.warn('Rate limit exceeded', { tenantId });
     return res.status(429).json({ error: 'Too many requests. Please slow down.', code: 'RATE_LIMITED' });
   }
 
@@ -95,6 +104,12 @@ export default async function handler(
     return res.status(400).json({ error: 'downloadUrl must be a valid URL', code: 'INVALID_FIELD' });
   }
 
+  log.info('Starting document ingest', {
+    tenantId,
+    documentId: documentId.trim(),
+    fileName:   fileName.trim(),
+  });
+
   // ── Run pipeline ───────────────────────────────────────────────────────────
   // processDocument handles status reporting to the CMS internally.
   const outcome = await processDocument({
@@ -104,7 +119,24 @@ export default async function handler(
     downloadUrl: downloadUrl.trim(),
   });
 
+  const durationMs = Date.now() - startMs;
+
   if (outcome.status === 'completed') {
+    logRequest({
+      component: COMPONENT,
+      method:    req.method,
+      path:      '/api/knowledge/ingest',
+      status:    200,
+      ip:        (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown',
+      tenantId,
+      durationMs,
+    });
+    log.info('Document ingest completed', {
+      tenantId,
+      documentId: documentId.trim(),
+      chunkCount: outcome.chunkCount,
+      durationMs,
+    });
     return res.status(200).json({
       documentId: documentId.trim(),
       status:     'completed',
@@ -112,7 +144,14 @@ export default async function handler(
     });
   }
 
-  // Processing failed — return 422 with the error detail.
+  // Processing failed — emit monitoring event and return 422.
+  monitorProcessingError(COMPONENT, outcome.error, tenantId, documentId.trim());
+  log.warn('Document ingest failed', {
+    tenantId,
+    documentId: documentId.trim(),
+    durationMs,
+  });
+
   return res.status(422).json({
     documentId: documentId.trim(),
     status:     'failed',
