@@ -3,6 +3,7 @@ import { requireCmsSecretOnly } from '@/lib/cms-auth';
 import { dispatchById } from '@/lib/processing-queue';
 import { ensureSchedulerRunning } from '@/lib/poll-scheduler';
 import { checkRateLimit } from '@/lib/rate-limiter';
+import { createLogger, logRequest } from '@/lib/logger';
 import type { ApiErrorResponse } from '@/types/widget';
 
 /**
@@ -32,11 +33,12 @@ import type { ApiErrorResponse } from '@/types/widget';
  * Response 200:
  *   { accepted: true }
  *
- * Side effect:
- *   Also ensures the background poll scheduler is running (lazy-init).
- *   This means the poller starts on the first push after server boot
- *   even if no dedicated startup hook exists.
+ * Error responses:
+ *   - All error messages are safe (no stack traces, no internal details).
  */
+
+const COMPONENT = 'process';
+const log = createLogger(COMPONENT);
 
 interface ProcessPushBody {
   document_id?: unknown;
@@ -56,6 +58,8 @@ export default function handler(
   req: NextApiRequest,
   res: NextApiResponse<AcceptedResponse | ApiErrorResponse>,
 ) {
+  const startMs = Date.now();
+
   // ── Method guard ──────────────────────────────────────────────────────────
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
@@ -75,6 +79,7 @@ export default function handler(
   const rate = checkRateLimit(`process:${ip}`, PROCESS_RATE_LIMIT, PROCESS_RATE_WINDOW);
   if (!rate.allowed) {
     res.setHeader('Retry-After', String(rate.retryAfterSeconds));
+    log.warn('Rate limit exceeded', { ip });
     return res.status(429).json({ error: 'Too many requests.', code: 'RATE_LIMITED' });
   }
 
@@ -103,10 +108,18 @@ export default function handler(
   // how long document processing takes.
   res.status(200).json({ accepted: true });
 
+  logRequest({
+    component: COMPONENT,
+    method:    req.method,
+    path:      '/api/process',
+    status:    200,
+    ip,
+    tenantId,
+    durationMs: Date.now() - startMs,
+  });
+
+  log.info('Push notification accepted', { tenantId, documentId });
+
   // ── Dispatch background processing ────────────────────────────────────────
-  // Fetches the document from CMS (to get download_url + file metadata),
-  // then runs the full pipeline: extract → chunk → embed → store.
-  // The dedup lock in processing-queue.ts prevents concurrent processing
-  // of the same documentId.
   dispatchById(documentId, tenantId);
 }
